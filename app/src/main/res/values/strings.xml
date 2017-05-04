@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">InfrastructureFallApp</string>
+
+    <string name="am_email">Recipient email:</string>
+    <string name="am_title">Email title:</string>
+    <string name="am_message">Email message:</string>
+    <string name="am_sensitivity">Sensitivity:</string>
+    <string name="required">This is required!</string>
+    <string name="wrong_email">Enter valid email</string>
 </resources>
