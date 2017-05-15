@@ -1,61 +1,49 @@
 package com.example.atakan.infrastructurefallapp;
 
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
-import android.location.Location;
 
-import com.example.atakan.infrastructurefallapp.api.ApiService;
-import com.google.android.gms.location.LocationListener;
 import android.os.Bundle;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
+import android.os.IBinder;
 import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.LocalBroadcastManager;
 import android.support.v7.app.AppCompatActivity;
 import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 
-import android.hardware.Sensor;
-import android.hardware.SensorManager;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
+import android.util.Log;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.SeekBar;
-import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.ToggleButton;
 
-import com.example.atakan.infrastructurefallapp.api.ApiResultListener;
 import com.example.atakan.infrastructurefallapp.model.Config;
-import com.example.atakan.infrastructurefallapp.model.EmailModel;
-import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.api.GoogleApiClient;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationServices;
-import com.google.gson.Gson;
+import com.example.atakan.infrastructurefallapp.services.FallingService;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 
-public class MainActivity extends AppCompatActivity implements SensorEventListener, ApiResultListener, LocationListener, GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener {
-    private final String TAG = "MainActivityDebug";
-    private final int REQUEST_LOCATION = 100;
+public class MainActivity extends AppCompatActivity {
+    private static final int REQUEST_LOCATION = 100;
+    public static final String IF_FALLING_SERVICE = "IFFallingService";
 
-    private float xValue, yValue, zValue;
-    private TextView xText, yText, zText;
-    private Sensor mySensor;
-    private SensorManager SM;
+    /** Messenger for communicating with the service. */
+    FallingService mService;
+
     private Config config;
     private ToggleButton mEnable;
     private EditText mEmailTo, mTitle, mMessage;
     private SeekBar mSensitivity;
-    private GoogleApiClient mGoogleApiClient;
-    private LocationRequest mLocationRequest;
-    private Location l;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,51 +52,51 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         // Load app config
         config = Config.getInstance(this);
-        asignConfigWidgets();
+        assignConfigWidgets();
 
-        //Assign Widgets
-        xText = (TextView) findViewById(R.id.xText);
-        yText = (TextView) findViewById(R.id.yText);
-        zText = (TextView) findViewById(R.id.zText);
-
-        // Enable or disable accelerometer
-        mEnable.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (isChecked) {
-                    if (checkInputs()) {
-                        bindListener();
-                    } else {
-                        mEnable.setChecked(false);
-                    }
-                } else {
-                    unbindListener();
-                }
-            }
-        });
-
-        // Google API client for Location
-        mGoogleApiClient = new GoogleApiClient.Builder(this)
-                .addConnectionCallbacks(this)
-                .addOnConnectionFailedListener(this)
-                .addApi(LocationServices.API)
-                .build();
-
-        // Location is updated every 3-5 minutes
-        mLocationRequest = new LocationRequest();
-        mLocationRequest.setInterval(1000 * 300);
-        mLocationRequest.setFastestInterval(1000 * 180);
-        mLocationRequest.setPriority(LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY);
+        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            mEnable.setEnabled(false);
+            // Check Permissions Now
+            ActivityCompat.requestPermissions(this,
+                    new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION},
+                    REQUEST_LOCATION);
+        } else {
+            bindEnableListener();
+        }
 
         // Bind listener if its enabled
         if (config.isEnabled()) {
-            bindListener();
+            bindFallingService();
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        registerReceiver(mMessageReceiver,
+                new IntentFilter(IF_FALLING_SERVICE));
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        unregisterReceiver(mMessageReceiver);
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+
+        if (mService != null) {
+            unbindFallingService();
         }
     }
 
     /**
      * Loading widgets to change settings
      */
-    private void asignConfigWidgets() {
+    private void assignConfigWidgets() {
         mEmailTo = (EditText) findViewById(R.id.am_email);
         mTitle = (EditText) findViewById(R.id.am_title);
         mMessage = (EditText) findViewById(R.id.am_message);
@@ -121,15 +109,30 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         updateUI();
     }
 
-    /**
-     * Reload data in widgets
-     */
-    private void updateUI() {
-        mEmailTo.setText(config.getEmailTo());
-        mTitle.setText(config.getTitle());
-        mMessage.setText(config.getMessage());
-        mSensitivity.setProgress(config.getSensitivity());
-        mEnable.setChecked(config.isEnabled());
+    private void bindEnableListener() {
+        // Enable or disable accelerometer
+        mEnable.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (isChecked) {
+                    if (checkInputs()) {
+                        bindFallingService();
+                    } else {
+                        mEnable.setChecked(false);
+                    }
+                } else {
+                    unbindFallingService();
+                }
+            }
+        });
+    }
+
+    private void bindFallingService() {
+        Intent i = new Intent(this, FallingService.class);
+        bindService(i, mConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private void unbindFallingService() {
+        unbindService(mConnection);
     }
 
     /**
@@ -215,179 +218,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     }
 
     /**
-     * Binds listener for Accelerometer and tries to start Location updates
+     * Reload data in widgets
      */
-    private void bindListener() {
-        //Create our Sensor Manager
-        SM = (SensorManager) getSystemService(SENSOR_SERVICE);
-        //Accelerometer Sensor
-        mySensor = SM.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        // Register sensor Listener
-        SM.registerListener(this, mySensor, SensorManager.SENSOR_DELAY_NORMAL);
-
-        // Try to start location updates
-        if(mGoogleApiClient.isConnected()) {
-            startLocationUpdates();
-        }
-    }
-
-    /**
-     * Disable listener and location updates
-     */
-    private void unbindListener() {
-        SM.unregisterListener(this, mySensor);
-        stopLocationUpdates();
-    }
-
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-        xValue = event.values[0];
-        yValue = event.values[1];
-        zValue = event.values[2];
-
-        xText.setText("X: " + event.values[0]);
-        yText.setText("Y: " + event.values[1]);
-        zText.setText("Z: " + event.values[2]);
-
-        if (Math.abs(xValue) > config.getSensitivity()
-                || Math.abs(yValue) > config.getSensitivity()
-                || Math.abs(zValue) > config.getSensitivity()) {
-            Toast.makeText(this, "It Hurts Yo!!!", Toast.LENGTH_SHORT).show();
-
-            // Disable sensor listener, save config and update UI()
-            unbindListener();
-            config.setEnabled(false);
-            Config.saveInstance(config);
-            updateUI();
-
-            // Sending email
-            sendEmail();
-        }
-    }
-
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {
-        // not gonna use now
-    }
-
-    public void sendEmail() {
-        // Gets message from config and adds Location
-        String message = config.getMessage();
-        if (l != null) {
-            message += " Last known location: " + l.getLatitude() + " (lat) and " + l.getLongitude() + "(long).";
-        }
-
-        // Set email headers
-        Map<String, String> headers = new HashMap<>();
-        headers.put("from", config.getEmailFrom());
-        headers.put("from-name", config.getNameFrom());
-
-        // Build email model
-        EmailModel e = new EmailModel(
-                config.getEmailTo(),
-                config.getTitle(),
-                message,
-                headers,
-                null
-        );
-
-        // Parse class to json with Gson
-        Gson gson = new Gson();
-        String jsonEmail = gson.toJson(e);
-
-        // Send email
-        ApiService as = new ApiService(this);
-        as.sendPostApi(jsonEmail);
-    }
-
-    @Override
-    protected void onStart() {
-        // Connect Google API client
-        mGoogleApiClient.connect();
-        super.onStart();
-    }
-
-    @Override
-    protected void onStop() {
-        // Stops updates and disconnects GAC
-        stopLocationUpdates();
-        mGoogleApiClient.disconnect();
-        super.onStop();
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
-        stopLocationUpdates();
-    }
-
-    @Override
-    public void onResume() {
-        super.onResume();
-        if (mGoogleApiClient.isConnected()) {
-            startLocationUpdates();
-        }
-    }
-
-    /**
-     * If enabled then it tries to start location updates (needs to have persmission check)
-     */
-    protected void startLocationUpdates() {
-        if(config.isEnabled()) {
-            if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                LocationServices.FusedLocationApi.requestLocationUpdates(
-                        mGoogleApiClient, mLocationRequest, this);
-            }
-        }
-    }
-
-    /**
-     * Disabling location updates
-     */
-    protected void stopLocationUpdates() {
-        LocationServices.FusedLocationApi.removeLocationUpdates(
-                mGoogleApiClient, this);
-    }
-
-    @Override
-    public void requestSuccessfull(String data) {
-    }
-
-    @Override
-    public void requestFailed(String message) {
-    }
-
-    @Override
-    public void onLocationChanged(Location location) {
-        // Update location
-        l = location;
-    }
-
-    /**
-     * Checks if app has permissions and gets current location.
-     * - After that is tries to start location updates
-     */
-    private void getLocation() {
-        // We can now safely use the API we requested access to
-        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            l = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
-            startLocationUpdates();
-        }
-    }
-
-    @Override
-    public void onConnected(@Nullable Bundle bundle) {
-        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
-            // Check Permissions Now
-            ActivityCompat.requestPermissions(this,
-                    new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION},
-                    REQUEST_LOCATION);
-        } else {
-            // Gets location
-            getLocation();
-        }
+    private void updateUI() {
+        mEmailTo.setText(config.getEmailTo());
+        mTitle.setText(config.getTitle());
+        mMessage.setText(config.getMessage());
+        mSensitivity.setProgress(config.getSensitivity());
+        mEnable.setChecked(config.isEnabled());
     }
 
     @Override
@@ -398,21 +236,42 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             if (grantResults.length == 1
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 // If permissions were granted try to get location
-                getLocation();
+                bindEnableListener();
             } else {
                 // Permission was denied or request was cancelled
+                Toast.makeText(this, "This app will not work without permissions. :(", Toast.LENGTH_SHORT).show();
             }
         }
     }
 
-    @Override
-    public void onConnectionSuspended(int i) {
+    /** Defines callbacks for service binding, passed to bindService() */
+    private ServiceConnection mConnection = new ServiceConnection() {
 
-    }
+        @Override
+        public void onServiceConnected(ComponentName className,
+                                       IBinder service) {
+            // We've bound to LocalService, cast the IBinder and get LocalService instance
+            FallingService.LocalBinder binder = (FallingService.LocalBinder) service;
+            mService = binder.getService();
+            updateUI();
+        }
 
-    @Override
-    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+        @Override
+        public void onServiceDisconnected(ComponentName arg0) {
+            /* Service crashed or was killed */
+            config.setEnabled(false);
+            Config.saveInstance(config);
+            updateUI();
+        }
+    };
 
-    }
+    private BroadcastReceiver mMessageReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int status = intent.getIntExtra("status", -1);
+            config = Config.getInstance(MainActivity.this);
+            updateUI();
+        }
+    };
 }
 
